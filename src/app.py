@@ -7,6 +7,9 @@ from dotenv import load_dotenv
 from starlette.middleware.base import BaseHTTPMiddleware
 import uuid
 from pythonjsonlogger import jsonlogger
+from fastapi.exceptions import RequestValidationError
+from fastapi import HTTPException
+from starlette.responses import JSONResponse
 
 from routes.load_balancer import router as lb_router
 from routes.health import router as health_router
@@ -91,12 +94,40 @@ app.add_middleware(
 # Exception handling
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    # Use logger with request_id context if available
     log = getattr(request.state, "logger", logger)
     log.error(f"Unhandled error: {exc}", exc_info=True)
+    debug = get_settings()["DEBUG"]
+    detail = str(exc) if debug else "Internal Server Error"
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"detail": "Internal Server Error", "request_id": getattr(request.state, 'request_id', None)}
+        content={
+            "detail": detail,
+            "request_id": getattr(request.state, 'request_id', None)
+        }
+    )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    log = getattr(request.state, "logger", logger)
+    log.warning(f"HTTP error: {exc.detail}", extra={"status_code": exc.status_code})
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "detail": exc.detail,
+            "request_id": getattr(request.state, "request_id", None)
+        }
+    )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    log = getattr(request.state, "logger", logger)
+    log.warning(f"Validation error: {exc.errors()}", extra={"status_code": 422})
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": exc.errors(),
+            "request_id": getattr(request.state, "request_id", None)
+        }
     )
 
 # Routers
