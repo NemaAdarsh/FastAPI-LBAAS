@@ -13,6 +13,7 @@ from starlette.responses import JSONResponse
 
 from routes.load_balancer import router as lb_router
 from routes.health import router as health_router
+from routes.metrics import router as metrics_router
 
 load_dotenv()
 
@@ -133,6 +134,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # Routers
 app.include_router(health_router, prefix="/health", tags=["health"])
 app.include_router(lb_router, prefix="/api/v1/loadbalancer", tags=["load-balancer"])
+app.include_router(metrics_router, prefix="/api/v1/metrics", tags=["metrics"])
 
 @app.get("/", tags=["root"])
 async def root():
