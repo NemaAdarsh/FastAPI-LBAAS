@@ -1,11 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import FastAPI, APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
 from models.database import get_db
 from models.load_balancer import LoadBalancer, BackendServer
 from utils.lb_manager import LoadBalancerManager
 from utils.schemas import LoadBalancerCreate, LoadBalancerResponse, BackendServerCreate
+from ..services.load_balancer_service import delete_load_balancer
+from ..auth import require_role
+from routes.auth import router as auth_router
 
+app = FastAPI()
 router = APIRouter()
 lb_manager = LoadBalancerManager()
 
@@ -56,16 +60,11 @@ async def add_backend_server(
     
     return backend
 
-@router.delete("/{lb_id}")
-async def delete_load_balancer(lb_id: int, db: Session = Depends(get_db)):
-    lb = db.query(LoadBalancer).filter(LoadBalancer.id == lb_id).first()
-    if not lb:
+@router.delete("/{lb_id}", dependencies=[Depends(require_role("admin"))])
+def delete_lb(lb_id: str):
+    if not delete_load_balancer(lb_id):
         raise HTTPException(status_code=404, detail="Load balancer not found")
-    
-    db.delete(lb)
-    db.commit()
-    
-    # Remove from HAProxy configuration
-    await lb_manager.delete_lb_config(lb)
-    
-    return {"message": "Load balancer deleted successfully"}
+    return {"detail": "Deleted"}
+
+app.include_router(router, prefix="/api/v1/load-balancers", tags=["load-balancers"])
+app.include_router(auth_router, prefix="/api/v1/auth", tags=["auth"])
