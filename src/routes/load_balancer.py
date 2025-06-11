@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, Depends, HTTPException
+from fastapi import FastAPI, APIRouter, Depends, HTTPException, Request, WebSocket
 from sqlalchemy.orm import Session
 from typing import List
 from models.database import get_db
@@ -14,6 +14,11 @@ import logging
 from utils.audit import log_audit
 from fastapi import Security
 from ..auth import get_current_user
+import subprocess
+import tempfile
+import os
+import time
+from fastapi.responses import JSONResponse
 
 app = FastAPI()
 router = APIRouter()
@@ -111,6 +116,16 @@ async def get_lb_metrics(lb_id: int, db: Session = Depends(get_db)):
         "unhealthy_backends": unhealthy,
     }
 
+@router.get("/{lb_id}/backends/health")
+async def get_backends_health(lb_id: int, db: Session = Depends(get_db)):
+    lb = db.query(LoadBalancer).filter(LoadBalancer.id == lb_id).first()
+    if not lb:
+        raise HTTPException(status_code=404, detail="Load balancer not found")
+    return [
+        {"ip": s.ip, "port": s.port, "healthy": s.healthy}
+        for s in lb.servers
+    ]
+
 class HealthChecker:
     def __init__(self, db_session_factory, interval=10):
         self.db_session_factory = db_session_factory
@@ -139,6 +154,67 @@ class HealthChecker:
 
     def stop(self):
         self.running = False
+
+    async def create_lb_config(self, lb):
+        # Generate config file content (implement as needed)
+        config_content = self.generate_config(lb)
+        config_path = f"/etc/haproxy/haproxy-{lb.id}.cfg"
+        with open(config_path, "w") as f:
+            f.write(config_content)
+        await self.reload_haproxy(config_path)
+
+    async def reload_haproxy(self, config_path):
+        # Validate config before reload
+        result = subprocess.run(["haproxy", "-c", "-f", config_path], capture_output=True)
+        if result.returncode != 0:
+            raise Exception(f"HAProxy config validation failed: {result.stderr.decode()}")
+        # Reload HAProxy gracefully
+        subprocess.run(["systemctl", "reload", "haproxy"])
+
+@router.get("/audit/logs", dependencies=[Depends(require_role("admin"))])
+def get_audit_logs(limit: int = 100):
+    # Assuming audit logs are written to a file
+    with open("/var/log/lbaas_audit.log") as f:
+        lines = f.readlines()[-limit:]
+    return [line.strip() for line in lines]
+
+rate_limit_store = {}
+
+@router.middleware("http")
+async def rate_limiter(request: Request, call_next):
+    user = request.state.user.username if hasattr(request.state, "user") else request.client.host
+    now = time.time()
+    window = 60  # seconds
+    max_requests = 100
+    history = rate_limit_store.get(user, [])
+    history = [t for t in history if now - t < window]
+    if len(history) >= max_requests:
+        return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded"})
+    history.append(now)
+    rate_limit_store[user] = history
+    return await call_next(request)
+
+@app.on_event("startup")
+async def start_health_checker():
+    checker = HealthChecker(db_session_factory=get_db, interval=10)
+    asyncio.create_task(checker.run())
+
+@router.websocket("/{lb_id}/ws/metrics")
+async def websocket_metrics(lb_id: int, websocket: WebSocket, db: Session = Depends(get_db)):
+    await websocket.accept()
+    while True:
+        lb = db.query(LoadBalancer).filter(LoadBalancer.id == lb_id).first()
+        if not lb:
+            await websocket.send_json({"error": "Load balancer not found"})
+            break
+        healthy = sum(1 for s in lb.servers if s.healthy)
+        unhealthy = len(lb.servers) - healthy
+        await websocket.send_json({
+            "total_backends": len(lb.servers),
+            "healthy_backends": healthy,
+            "unhealthy_backends": unhealthy,
+        })
+        await asyncio.sleep(5)
 
 app.include_router(router, prefix="/api/v1/load-balancers", tags=["load-balancers"])
 app.include_router(auth_router, prefix="/api/v1/auth", tags=["auth"])
