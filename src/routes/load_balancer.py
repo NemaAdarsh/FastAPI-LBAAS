@@ -24,16 +24,30 @@ from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey
 from sqlalchemy.orm import relationship, joinedload
 from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime
+import redis.asyncio as redis
+import json
+from typing import Optional, Any
+from datetime import timedelta
+from celery import Celery
+from kombu import Queue
+from celery import current_task
+from .celery_app import celery_app
+import aiohttp
+import asyncio
+from sqlalchemy.orm import sessionmaker
+from models.database import engine
+from models.load_balancer import BackendServer
+import logging
 
 app = FastAPI()
-router = APIRouter()
+router = APIRouter()    
 lb_manager = LoadBalancerManager()
 
 audit_logger = logging.getLogger("audit")
 
 def log_audit(action: str, user: str, resource: str, resource_id: int, details: dict = None):
     audit_logger.info({
-        "action": action,
+        "action": action,       
         "user": user,
         "resource": resource,
         "resource_id": resource_id,
@@ -398,3 +412,128 @@ async def create_tenant(
 ):
     tenant_service = TenantService(db)
     return tenant_service.create_tenant(tenant_data)
+
+class CacheService:
+    def __init__(self, redis_url: str = "redis://localhost:6379"):
+        self.redis = redis.from_url(redis_url)
+    
+    async def get(self, key: str) -> Optional[Any]:
+        """Get cached value"""
+        value = await self.redis.get(key)
+        if value:
+            return json.loads(value)
+        return None
+    
+    async def set(self, key: str, value: Any, expire: int = 3600) -> bool:
+        """Cache a value with expiration"""
+        return await self.redis.set(key, json.dumps(value), ex=expire)
+    
+    async def delete(self, key: str) -> bool:
+        """Delete cached value"""
+        return await self.redis.delete(key) > 0
+    
+    async def get_or_set(self, key: str, callable_func, expire: int = 3600):
+        """Get from cache or execute function and cache result"""
+        cached = await self.get(key)
+        if cached is not None:
+            return cached
+        
+        result = await callable_func() if asyncio.iscoroutinefunction(callable_func) else callable_func()
+        await self.set(key, result, expire)
+        return result
+    
+    async def invalidate_pattern(self, pattern: str):
+        """Invalidate all keys matching pattern"""
+        keys = await self.redis.keys(pattern)
+        if keys:
+            await self.redis.delete(*keys)
+
+# Global cache instance
+cache = CacheService()
+
+celery_app = Celery(
+    "lbaas_worker",
+    broker="redis://localhost:6379/0",
+    backend="redis://localhost:6379/0",
+    include=["tasks.load_balancer_tasks", "tasks.health_check_tasks"]
+)
+
+celery_app.conf.update(
+    task_serializer="json",
+    accept_content=["json"],
+    result_serializer="json",
+    timezone="UTC",
+    enable_utc=True,
+    task_routes={
+        "tasks.health_check_tasks.check_backend_health": {"queue": "health_checks"},
+        "tasks.load_balancer_tasks.*": {"queue": "lb_operations"},
+    },
+    task_queues=(
+        Queue("health_checks", routing_key="health_checks"),
+        Queue("lb_operations", routing_key="lb_operations"),
+        Queue("default", routing_key="default"),
+    ),
+)
+
+logger = logging.getLogger(__name__)
+
+@celery_app.task(bind=True)
+def check_backend_health(self, backend_id: int):
+    """Check health of a specific backend server"""
+    try:
+        SessionLocal = sessionmaker(bind=engine)
+        db = SessionLocal()
+        
+        backend = db.query(BackendServer).filter(BackendServer.id == backend_id).first()
+        if not backend:
+            return {"status": "error", "message": "Backend not found"}
+        
+        # Perform health check
+        url = f"http://{backend.ip}:{backend.port}/health"
+        
+        async def check():
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                        return resp.status == 200
+            except Exception as e:
+                logger.error(f"Health check failed for {url}: {e}")
+                return False
+        
+        # Run async function in sync context
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        is_healthy = loop.run_until_complete(check())
+        loop.close()
+        
+        # Update database
+        backend.healthy = is_healthy
+        db.commit()
+        db.close()
+        
+        return {
+            "status": "success",
+            "backend_id": backend_id,
+            "healthy": is_healthy,
+            "url": url
+        }
+        
+    except Exception as e:
+        logger.error(f"Health check task failed: {e}")
+        return {"status": "error", "message": str(e)}
+
+@celery_app.task
+def bulk_health_check():
+    """Check health of all backend servers"""
+    SessionLocal = sessionmaker(bind=engine)
+    db = SessionLocal()
+    
+    backends = db.query(BackendServer).all()
+    task_ids = []
+    
+    for backend in backends:
+        task = check_backend_health.delay(backend.id)
+        task_ids.append(task.id)
+    
+    db.close()
+    return {"message": f"Queued {len(task_ids)} health checks", "task_ids": task_ids}
