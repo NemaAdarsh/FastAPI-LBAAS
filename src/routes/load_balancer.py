@@ -69,21 +69,25 @@ async def create_load_balancer(
             status_code=403, 
             detail=f"Tenant limit reached. Max {limits['max_load_balancers']} load balancers allowed."
         )
-    
     # Create load balancer with tenant isolation
     lb_data_dict = lb_data.dict()
     lb_data_dict["tenant_id"] = user.tenant_id
-    
+
     db_lb = LoadBalancer(**lb_data_dict)
     db.add(db_lb)
     db.commit()
     db.refresh(db_lb)
-    
+
     # Generate HAProxy configuration
     await lb_manager.create_lb_config(db_lb)
     log_audit("create_lb", user.username, "load_balancer", db_lb.id, {"tenant_id": user.tenant_id})
-    
+
     return db_lb
+
+@router.get("/health", summary="Check service health")
+async def health_check():
+    return {"status": "ok", "message": "Load Balancer Service is healthy"}
+    
 
 @router.get("/", response_model=List[LoadBalancerResponse])
 async def list_load_balancers(
