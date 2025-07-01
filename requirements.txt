@@ -1,10 +1,65 @@
+# FastAPI and Core Dependencies
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 pydantic==2.5.0
+pydantic[email]==2.5.0
+
+# Database
 sqlalchemy==2.0.23
-psycopg2-binary==2.9.9
 alembic==1.13.0
-python-dotenv==1.0.0
-httpx==0.25.2
-jinja2==3.1.2
+psycopg2-binary==2.9.9  # PostgreSQL
+
+# Authentication & Security
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
 python-multipart==0.0.6
+bcrypt==4.1.1
+
+# Redis & Caching
+redis==5.0.1
+hiredis==2.2.3
+
+# Background Tasks & Message Queue
+celery==5.3.4
+kombu==5.3.4
+
+# HTTP Client & WebSocket
+aiohttp==3.9.1
+websockets==12.0
+requests==2.31.0
+websocket-client==1.6.4
+
+# Monitoring & Metrics
+psutil==5.9.6
+prometheus-client==0.19.0
+
+# Logging
+python-json-logger==2.0.7
+
+# Environment & Configuration
+python-dotenv==1.0.0
+pyyaml==6.0.1
+
+# CORS & Middleware
+starlette==0.27.0
+
+# Development & Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+httpx==0.25.2
+
+# Template Engine
+jinja2==3.1.2
+
+# Rate Limiting
+slowapi==0.1.9
+
+# Network Utilities
+netaddr==0.9.0
+
+# Async Database Support
+asyncpg==0.29.0  # Async PostgreSQL
+aiosqlite==0.19.0  # Async SQLite
+
+# File Operations
+aiofiles==23.2.1
